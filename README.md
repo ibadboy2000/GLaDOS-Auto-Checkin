@@ -1,5 +1,18 @@
 # 📌 GLaDOS 自动签到
 
+## 浏览器签到（2026-11-15）
+
+默认使用标准 Playwright Chromium 打开官网签到页，由页面获取 challenge 并处理 Turnstile，再读取实际签到接口结果。现有 `COOKIES`、多账号、通知渠道和定时时间继续使用。
+
+- GitHub Actions 安装 `requirements.txt` 和 Chromium，通过 Xvfb 运行浏览器。
+- 登录设备不匹配或验证需要人工处理时会报告失败；浏览器模式不能保证所有运行环境均可无人值守通过验证。
+- `codex/restore-browser-checkin` 分支的 push 会自动验证，验证时不发通知、不兑换积分，要求每个账号均成功或已签到。
+- 积分兑换仅在签到成功或已签到且达到所配阈值时执行。
+- 本地运行：`pip install -r requirements.txt`、`python -m playwright install chromium`，设置 `COOKIES` 后执行 `python checkin.py`。
+- 如需诊断旧接口，可显式设置 `GLADOS_CHECKIN_MODE=http`；该模式不执行网页验证。
+
+---
+
 一个基于 **GitHub Actions** 的 **GLaDOS 自动签到脚本**。
 
 **无需服务器、无需编程基础**，每天自动帮你签到。
@@ -233,3 +246,4 @@ A: 可以，配置多个 Secrets 即可同时推送。
 ## 📄 许可证
 
 MIT License
+
