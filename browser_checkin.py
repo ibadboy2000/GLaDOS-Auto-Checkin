@@ -1,6 +1,11 @@
 """Use the site's own check-in page and its normal verification flow."""
 import logging
 import os
+import json
+import re
+import time
+from collections import Counter
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
@@ -9,6 +14,67 @@ logger = logging.getLogger("GLaDOS")
 BASE_URL = "https://glados.cloud"
 CHECKIN_PAGE = BASE_URL + "/console/checkin"
 CHECKIN_PATH = "/api/user/checkin"
+
+
+class VerificationDiagnostics:
+    """Collect bounded metadata; never record URLs, headers, bodies or tokens."""
+    def __init__(self, page, browser_version):
+        self.page = page
+        self.browser_version = browser_version
+        self.statuses = Counter()
+        self.failures = Counter()
+        self.error_codes = set()
+        self.api_loaded = False
+        self.clock_skew_seconds = None
+        page.on("response", self.on_response)
+        page.on("requestfailed", self.on_request_failed)
+        page.on("console", self.on_console)
+
+    def on_response(self, response):
+        location = urlsplit(response.url)
+        if location.hostname == "challenges.cloudflare.com":
+            self.statuses[str(response.status)] += 1
+            if location.path == "/turnstile/v0/api.js" and response.ok:
+                self.api_loaded = True
+        elif location.hostname == "glados.cloud" and location.path == "/console/checkin":
+            try:
+                server_time = parsedate_to_datetime(response.headers["date"]).timestamp()
+                self.clock_skew_seconds = round(time.time() - server_time)
+            except (KeyError, ValueError, TypeError, OverflowError):
+                pass
+
+    def on_request_failed(self, request):
+        if urlsplit(request.url).hostname == "challenges.cloudflare.com":
+            match = re.search(r"net::ERR_[A-Z_]+", request.failure or "")
+            self.failures[match.group() if match else "other"] += 1
+
+    def on_console(self, message):
+        # Cloudflare's six-digit public error codes only, never raw console text.
+        content = message.text
+        if "turnstile" in content.lower():
+            self.error_codes.update(re.findall(r"(?:error|code)\s*[:=]?\s*([1-6]\d{5})\b", content, re.I))
+
+    def snapshot(self):
+        frames = [frame for frame in self.page.frames
+                  if urlsplit(frame.url).hostname == "challenges.cloudflare.com"]
+        interactive_checkbox_visible = False
+        for frame in frames:
+            try:
+                checkbox = frame.get_by_role("checkbox")
+                if checkbox.count() and checkbox.first.is_visible():
+                    interactive_checkbox_visible = True
+            except Exception:
+                pass
+        return {
+            "browser_version": self.browser_version,
+            "verification_script_loaded": self.api_loaded,
+            "cloudflare_http_statuses": dict(self.statuses),
+            "cloudflare_network_errors": dict(self.failures),
+            "turnstile_error_codes": sorted(self.error_codes),
+            "challenge_frame_count": len(frames),
+            "interactive_checkbox_visible": interactive_checkbox_visible,
+            "clock_skew_seconds": self.clock_skew_seconds,
+        }
 
 
 def browser_cookies(cookie):
@@ -32,9 +98,11 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
     No screenshots, traces, cookies or verification tokens are saved to logs.
     """
     context = browser.new_context(locale="en-US", timezone_id="Asia/Shanghai")
+    diagnostic = None
     try:
         context.add_cookies(browser_cookies(cookie))
         page = context.new_page()
+        diagnostic = VerificationDiagnostics(page, browser.version)
         response = page.goto(CHECKIN_PAGE, wait_until="domcontentloaded", timeout=45000)
         if response is None or response.status >= 400:
             status = response.status if response else "no response"
@@ -82,6 +150,11 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
     except BrowserTimeout:
         return failure("浏览器签到等待超时，可能需要人工验证；未确认签到成功", "timeout")
     finally:
+        if diagnostic is not None:
+            try:
+                logger.info("Verification diagnostics: %s", json.dumps(diagnostic.snapshot(), ensure_ascii=True))
+            except Exception:
+                logger.info("Verification diagnostics: unavailable")
         context.close()
 
 

@@ -2,6 +2,7 @@
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright
@@ -70,6 +71,26 @@ class BrowserFlowTests(unittest.TestCase):
 
 
 class ResultTests(unittest.TestCase):
+    def test_diagnostics_do_not_export_tokens_or_urls(self):
+        page = SimpleNamespace(on=lambda *args: None, frames=[])
+        diagnostic = browser_checkin.VerificationDiagnostics(page, "test-browser")
+        diagnostic.on_response(SimpleNamespace(
+            url="https://challenges.cloudflare.com/turnstile/v0/api.js?secret=never-export",
+            status=200, ok=True))
+        diagnostic.on_response(SimpleNamespace(
+            url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/pat/never-export",
+            status=401, ok=False))
+        diagnostic.on_console(SimpleNamespace(text="[Cloudflare Turnstile] Error: 600010; token=123456; secret=never-export"))
+        diagnostic.on_request_failed(SimpleNamespace(
+            url="https://challenges.cloudflare.com/private/never-export",
+            failure="net::ERR_CONNECTION_RESET"))
+        snapshot = diagnostic.snapshot()
+        self.assertTrue(snapshot["verification_script_loaded"])
+        self.assertEqual(snapshot["turnstile_error_codes"], ["600010"])
+        self.assertEqual(snapshot["cloudflare_http_statuses"]["401"], 1)
+        self.assertNotIn("never-export", json.dumps(snapshot))
+        self.assertNotIn("https://", json.dumps(snapshot))
+
     def test_cookie_values_and_prefixes_preserved(self):
         values = browser_checkin.browser_cookies(COOKIE)
         self.assertEqual(values[0]["name"], "gld:sess")

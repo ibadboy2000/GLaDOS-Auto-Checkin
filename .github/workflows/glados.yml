@@ -12,6 +12,9 @@ jobs:
   checkin:
     name: GLaDOS 签到
     runs-on: windows-2022
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     timeout-minutes: 15
     if: github.event_name != 'schedule' || github.event.schedule != '0 0 1 * *'
     concurrency:
