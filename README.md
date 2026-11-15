@@ -2,6 +2,13 @@
 
 ## 浏览器签到（2026-11-15）
 
+**验证状态：尚未恢复 GitHub 免费托管环境的无人值守签到，不应作为已修复版本合并。**
+
+- [Linux Chromium 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43722927718)：7 项测试通过，两个真实账号返回 `device-mismatch`，Turnstile 等待超时。
+- [Windows Chrome 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43723752017)：7 项测试通过，两个真实账号不再返回设备不匹配，但均返回 `reason=turnstile`、`tsState=timeout`；签到未记录。
+- 上述试运行未发送通知、未兑换积分。仅迁移 Cookie、改用 Windows 或恢复旧浏览器脚本均未使本次云端验证成功。
+- 还需要能够在托管环境正常通过的网站验证流程或服务方支持的自动化方式；本分支不包含人工验证绕过、令牌伪造或第三方验证码服务。
+
 默认使用标准 Playwright Chromium 打开官网签到页，由页面获取 challenge 并处理 Turnstile，再读取实际签到接口结果。现有 `COOKIES`、多账号、通知渠道和定时时间继续使用。
 
 - GitHub Actions 使用 Windows 免费托管环境中预装的标准 Chrome，安装 `requirements.txt` 和测试用 Chromium。
