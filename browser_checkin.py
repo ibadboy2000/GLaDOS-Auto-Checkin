@@ -71,6 +71,10 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
         logger.info("浏览器签到 HTTP %d，验证状态: %s，结果原因: %s",
                     checkin_response.status, state, payload.get("reason", "-"))
         if payload.get("reason") == "device-mismatch":
+            for key in ("loginDevice", "currentDevice"):
+                description = payload.get(key)
+                if isinstance(description, str):
+                    logger.info("%s: %s", key, description.replace("\n", " ")[:120])
             payload["message"] = "登录设备与运行设备不一致，请在运行环境重新登录；原始会话不能直接迁移"
         elif payload.get("reason") == "turnstile":
             payload["message"] = "Cloudflare 验证未通过，需在运行环境完成人工验证；本次未签到"
@@ -83,7 +87,11 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
 
 def checkin(cookie):
     with sync_playwright() as engine:
-        browser = engine.chromium.launch(headless=os.getenv("GLADOS_HEADLESS", "0") == "1")
+        options = {"headless": os.getenv("GLADOS_HEADLESS", "0") == "1"}
+        channel = os.getenv("GLADOS_BROWSER_CHANNEL")
+        if channel:
+            options["channel"] = channel
+        browser = engine.chromium.launch(**options)
         try:
             return perform_checkin(browser, cookie)
         finally:
