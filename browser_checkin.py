@@ -25,7 +25,7 @@ class VerificationDiagnostics:
         self.failures = Counter()
         self.error_codes = set()
         self.api_loaded = False
-        self.clock_skew_seconds = None
+        self.page_date_delta_seconds = None
         page.on("response", self.on_response)
         page.on("requestfailed", self.on_request_failed)
         page.on("console", self.on_console)
@@ -34,12 +34,21 @@ class VerificationDiagnostics:
         location = urlsplit(response.url)
         if location.hostname == "challenges.cloudflare.com":
             self.statuses[str(response.status)] += 1
-            if location.path == "/turnstile/v0/api.js" and response.ok:
-                self.api_loaded = True
+            request = response.request
+            # api.js can redirect to a versioned URL. Match its redirect chain
+            # rather than marking a successfully loaded widget as missing.
+            for _ in range(8):
+                source = urlsplit(request.url)
+                if source.hostname == "challenges.cloudflare.com" and source.path == "/turnstile/v0/api.js":
+                    self.api_loaded = self.api_loaded or response.ok
+                    break
+                request = request.redirected_from
+                if request is None:
+                    break
         elif location.hostname == "glados.cloud" and location.path == "/console/checkin":
             try:
                 server_time = parsedate_to_datetime(response.headers["date"]).timestamp()
-                self.clock_skew_seconds = round(time.time() - server_time)
+                self.page_date_delta_seconds = round(time.time() - server_time)
             except (KeyError, ValueError, TypeError, OverflowError):
                 pass
 
@@ -73,7 +82,8 @@ class VerificationDiagnostics:
             "turnstile_error_codes": sorted(self.error_codes),
             "challenge_frame_count": len(frames),
             "interactive_checkbox_visible": interactive_checkbox_visible,
-            "clock_skew_seconds": self.clock_skew_seconds,
+            # A cached response Date is not an authoritative clock check.
+            "page_date_delta_seconds": self.page_date_delta_seconds,
         }
 
 
@@ -145,7 +155,7 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
                     logger.info("%s: %s", key, description.replace("\n", " ")[:120])
             payload["message"] = "登录设备与运行设备不一致，请在运行环境重新登录；原始会话不能直接迁移"
         elif payload.get("reason") == "turnstile":
-            payload["message"] = "Cloudflare 验证未通过，需在运行环境完成人工验证；本次未签到"
+            payload["message"] = "Cloudflare 验证未完成，本次未签到；请查看 Verification diagnostics"
         return payload
     except BrowserTimeout:
         return failure("浏览器签到等待超时，可能需要人工验证；未确认签到成功", "timeout")

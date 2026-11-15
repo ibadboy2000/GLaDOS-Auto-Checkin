@@ -7,6 +7,9 @@
 - [Linux Chromium 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43722927718)：7 项测试通过，两个真实账号返回 `device-mismatch`，Turnstile 等待超时。
 - [Windows Chrome 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43723752017)：7 项测试通过，两个真实账号不再返回设备不匹配，但均返回 `reason=turnstile`、`tsState=timeout`；签到未记录。
 - 上述试运行未发送通知、未兑换积分。仅迁移 Cookie、改用 Windows 或恢复旧浏览器脚本均未使本次云端验证成功。
+- [Windows Chrome 诊断运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43725307578)：8 项测试通过；两个真实账号均有 1 个验证 iframe，Cloudflare 主域名无记录到的网络失败，有成功的 HTTP 200 响应，页面 Date 与本机时间差为 0–1 秒；仍返回 `reason=turnstile`、`tsState=timeout`，未取得有效验证令牌。未捕获到六位客户端错误码，未观察到可见复选框；这些信息不能证明已识别出服务端具体判定规则。
+- 诊断中的 `verification_script_loaded=false` 只识别原始脚本地址，可能受 `api.js` 重定向影响，不能据此断言脚本加载失败：已改为跟踪重定向链，并增加测试；验证 iframe 已实际加载。页面 Date 仅作参考，不等于权威时钟校验。
+- Cloudflare 官方说明：[生产验证不支持自动化浏览器及 Playwright 等框架](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)；[PAT 请求的 HTTP 401 可能是正常回退](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)，不能单独作为被拦截或环境故障的依据。
 - 还需要能够在托管环境正常通过的网站验证流程或服务方支持的自动化方式；本分支不包含人工验证绕过、令牌伪造或第三方验证码服务。
 
 默认使用标准 Playwright Chromium 打开官网签到页，由页面获取 challenge 并处理 Turnstile，再读取实际签到接口结果。现有 `COOKIES`、多账号、通知渠道和定时时间继续使用。

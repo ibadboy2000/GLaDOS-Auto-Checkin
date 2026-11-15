@@ -76,10 +76,10 @@ class ResultTests(unittest.TestCase):
         diagnostic = browser_checkin.VerificationDiagnostics(page, "test-browser")
         diagnostic.on_response(SimpleNamespace(
             url="https://challenges.cloudflare.com/turnstile/v0/api.js?secret=never-export",
-            status=200, ok=True))
+            status=200, ok=True, request=SimpleNamespace(url="https://challenges.cloudflare.com/turnstile/v0/api.js", redirected_from=None)))
         diagnostic.on_response(SimpleNamespace(
             url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/pat/never-export",
-            status=401, ok=False))
+            status=401, ok=False, request=SimpleNamespace(url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/pat/never-export", redirected_from=None)))
         diagnostic.on_console(SimpleNamespace(text="[Cloudflare Turnstile] Error: 600010; token=123456; secret=never-export"))
         diagnostic.on_request_failed(SimpleNamespace(
             url="https://challenges.cloudflare.com/private/never-export",
@@ -90,6 +90,14 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(snapshot["cloudflare_http_statuses"]["401"], 1)
         self.assertNotIn("never-export", json.dumps(snapshot))
         self.assertNotIn("https://", json.dumps(snapshot))
+
+    def test_diagnostics_follow_verification_script_redirect(self):
+        page = SimpleNamespace(on=lambda *args: None, frames=[])
+        diagnostic = browser_checkin.VerificationDiagnostics(page, "test-browser")
+        original = SimpleNamespace(url="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit", redirected_from=None)
+        redirected = SimpleNamespace(url="https://challenges.cloudflare.com/turnstile/v0/versioned/api.js", redirected_from=original)
+        diagnostic.on_response(SimpleNamespace(url=redirected.url, status=200, ok=True, request=redirected))
+        self.assertTrue(diagnostic.snapshot()["verification_script_loaded"])
 
     def test_cookie_values_and_prefixes_preserved(self):
         values = browser_checkin.browser_cookies(COOKIE)
