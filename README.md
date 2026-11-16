@@ -7,6 +7,11 @@
 手动运行默认启用 `verify_only`，与分支 push 验证一样跳过通知、兑换，且任一账号失败均返回失败。模拟测试成功只说明流程正确；当天已签到的账号通过预检也不代表新的云端签到或 Cloudflare 验证已通过。
 分支 push 还会启用只读的验证就绪检查：即使今天已签到，也等待网站原生 Turnstile 就绪，但绝不再次提交。手动验证可勾选 `probe_verification`；常规定时签到不启用此检查。
 
+本次实测结果：
+- [签到记录预检](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43781612052)：15 项测试通过，两个账号均由官网记录确认今日已签到，零签到提交。已兼容官网记录中的毫秒时间戳。
+- [原生验证就绪检查](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43782105981)：17 项测试通过；Windows 标准 Chrome 157.0.8103.79 中，两个账号各等待 90 秒后仍未取得就绪状态，零签到提交、零通知、零兑换；运行正确失败退出。
+- 结果分类仅接受合法的成功/已签到接口代码，错误文案中的“避免重复签到”等词不会再导致任务误报通过。常规预检通过不代表 Cloudflare 问题已解决；本改动保持草稿，尚未恢复免费托管环境中的无人值守签到。
+
 **验证状态：尚未恢复 GitHub 免费托管环境的无人值守签到，不应作为已修复版本合并。**
 
 - [Linux Chromium 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43722927718)：7 项测试通过，两个真实账号返回 `device-mismatch`，Turnstile 等待超时。
