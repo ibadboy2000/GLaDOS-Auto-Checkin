@@ -7,6 +7,10 @@ on:
         description: '验证运行：跳过通知和兑换，并要求全部账号通过'
         type: boolean
         default: true
+      probe_verification:
+        description: '即使今日已签到，也只读检查 Turnstile 是否就绪（仅验证运行有效）'
+        type: boolean
+        default: false
   push:
     branches: [codex/restore-browser-checkin]
   schedule:
@@ -51,6 +55,7 @@ jobs:
           GLADOS_CHECKIN_MODE: browser
           GLADOS_BROWSER_CHANNEL: chrome
           GLADOS_VERIFY_ONLY: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.verify_only)) && '1' || '0' }}
+          GLADOS_PROBE_VERIFICATION: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.probe_verification)) && '1' || '0' }}
           COOKIES: ${{ secrets.COOKIES || vars.COOKIES }}
           SENDKEY: ${{ secrets.SENDKEY }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}

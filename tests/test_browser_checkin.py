@@ -24,7 +24,7 @@ class BrowserFlowTests(unittest.TestCase):
         cls.browser.close()
         cls.engine.stop()
 
-    def run_fixture(self, payload, status=200, history=None, ledger_valid=True, verification_ready=True, expected_submissions=1):
+    def run_fixture(self, payload, status=200, history=None, ledger_valid=True, verification_ready=True, expected_submissions=1, probe_verification=False):
         submissions = []
         real_new_context = self.browser.new_context
 
@@ -56,7 +56,7 @@ class BrowserFlowTests(unittest.TestCase):
             return context
 
         with patch.object(self.browser, "new_context", side_effect=new_context):
-            result = browser_checkin.perform_checkin(self.browser, COOKIE, timeout_ms=5000, verification_timeout_ms=600)
+            result = browser_checkin.perform_checkin(self.browser, COOKIE, timeout_ms=5000, verification_timeout_ms=600, probe_verification=probe_verification)
         self.assertEqual(len(submissions), expected_submissions)
         if submissions:
             self.assertEqual(submissions[0]["tsState"], "ok")
@@ -93,6 +93,18 @@ class BrowserFlowTests(unittest.TestCase):
     def test_turnstile_must_be_ready_before_clicking(self):
         result = self.run_fixture({"code": 0}, verification_ready=False, expected_submissions=0)
         self.assertEqual(result["reason"], "verification-pending")
+
+    def test_already_checked_account_can_probe_verification_without_posting(self):
+        row = {"business": "checkin", "time": datetime.now(timezone.utc).isoformat(), "change": 7}
+        result = self.run_fixture({"code": 0}, history=[row], expected_submissions=0, probe_verification=True)
+        self.assertTrue(result["verification_ready"])
+        self.assertTrue(result["repeated"])
+
+    def test_probe_failure_is_not_hidden_by_an_earlier_checkin(self):
+        row = {"business": "checkin", "time": datetime.now(timezone.utc).isoformat(), "change": 7}
+        result = self.run_fixture({"code": 0}, history=[row], expected_submissions=0, probe_verification=True, verification_ready=False)
+        self.assertEqual(result["reason"], "verification-pending")
+        self.assertEqual(checkin.classify_checkin(result["code"], result["message"]), "fail")
 
 
 class ResultTests(unittest.TestCase):

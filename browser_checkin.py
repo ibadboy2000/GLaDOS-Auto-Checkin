@@ -39,6 +39,7 @@ class VerificationDiagnostics:
         self.checkin_posted = False
         self.precheck = "not-run"
         self.ledger_schema = None
+        self.probe_only = False
         page.on("request", self.on_request)
         page.on("response", self.on_response)
         page.on("requestfailed", self.on_request_failed)
@@ -117,6 +118,7 @@ class VerificationDiagnostics:
             "checkin_posted": self.checkin_posted,
             "precheck": self.precheck,
             "ledger_schema": self.ledger_schema,
+            "verification_probe": self.probe_only,
         }
 
 
@@ -172,7 +174,7 @@ def today_checkin(points, now=None):
     return {"checked": checked, "earned": None if unknown else int(total)}
 
 
-def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=90000):
+def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=90000, probe_verification=False):
     """One isolated context and at most one submission per account.
 
     Interactive verification and device/login failures are reported, not bypassed.
@@ -184,6 +186,7 @@ def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=
         context.add_cookies(browser_cookies(cookie))
         page = context.new_page()
         diagnostic = VerificationDiagnostics(page, browser.version)
+        diagnostic.probe_only = probe_verification
         response = page.goto(CHECKIN_PAGE, wait_until="domcontentloaded", timeout=45000)
         if response is None or response.status >= 400:
             status = response.status if response else "no response"
@@ -218,8 +221,10 @@ def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=
         if previous["checked"]:
             diagnostic.precheck = "already-checked"
             logger.info("官网积分记录确认今日已签到，跳过提交；今日获得积分: %s", previous["earned"] if previous["earned"] is not None else "unknown")
-            return {"code": 0, "repeated": True, "points": previous["earned"], "today_points": previous["earned"], "message": "今日已签到（由官网积分记录确认）", "source": "history"}
-        diagnostic.precheck = "not-checked"
+            if not probe_verification:
+                return {"code": 0, "repeated": True, "points": previous["earned"], "today_points": previous["earned"], "message": "今日已签到（由官网积分记录确认）", "source": "history"}
+        else:
+            diagnostic.precheck = "not-checked"
 
         challenge_deadline = time.monotonic() + 15
         while not diagnostic.challenge_loaded and time.monotonic() < challenge_deadline:
@@ -235,9 +240,14 @@ def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=
                 diagnostic.verification_ready = True
             except BrowserTimeout:
                 diagnostic.verification_ready = False
-                return failure("官网 Turnstile 在托管浏览器中未完成验证，本次未提交签到", "verification-pending")
+                prefix = "今日已签到；但" if previous["checked"] else ""
+                return failure(prefix + "官网 Turnstile 在托管浏览器中未完成验证，本次未提交签到", "verification-pending")
         else:
             diagnostic.verification_ready = True
+
+        if previous["checked"]:
+            logger.info("官网验证就绪检查通过；账号今日已签到，不再提交")
+            return {"code": 0, "repeated": True, "points": previous["earned"], "today_points": previous["earned"], "message": "今日已签到，托管验证就绪检查通过", "source": "history", "verification_ready": True}
 
         # Let the frontend create its proof and submit the fresh challenge.
         with page.expect_response(
@@ -291,6 +301,7 @@ def checkin(cookie):
             options["channel"] = channel
         browser = engine.chromium.launch(**options)
         try:
-            return perform_checkin(browser, cookie)
+            probe = os.getenv("GLADOS_VERIFY_ONLY") == "1" and os.getenv("GLADOS_PROBE_VERIFICATION") == "1"
+            return perform_checkin(browser, cookie, probe_verification=probe)
         finally:
             browser.close()
