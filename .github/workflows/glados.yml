@@ -1,7 +1,18 @@
 name: GLaDOS Auto Checkin
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: '验证运行：跳过通知和兑换，并要求全部账号通过'
+        type: boolean
+        default: true
+      probe_verification:
+        description: '即使今日已签到，也只读检查 Turnstile 是否就绪（仅验证运行有效）'
+        type: boolean
+        default: false
+  push:
+    branches: [codex/restore-browser-checkin]
   schedule:
     - cron: '0 4 * * *'   # 每日 UTC 4 点签到（北京时间 12 点）
     - cron: '0 0 1 * *'   # 每月 1 号保活空提交
@@ -9,7 +20,10 @@ on:
 jobs:
   checkin:
     name: GLaDOS 签到
-    runs-on: ubuntu-latest
+    runs-on: windows-2022
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     timeout-minutes: 15
     if: github.event_name != 'schedule' || github.event.schedule != '0 0 1 * *'
     concurrency:
@@ -28,11 +42,20 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install "requests==2.32.3" --no-cache-dir
+        run: |
+          pip install -r requirements.txt --no-cache-dir
+          python -m playwright install chromium
+
+      - name: Test browser flow
+        run: python -m unittest discover -s tests -v
 
       - name: Run checkin
         run: python checkin.py
         env:
+          GLADOS_CHECKIN_MODE: browser
+          GLADOS_BROWSER_CHANNEL: chrome
+          GLADOS_VERIFY_ONLY: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.verify_only)) && '1' || '0' }}
+          GLADOS_PROBE_VERIFICATION: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.probe_verification)) && '1' || '0' }}
           COOKIES: ${{ secrets.COOKIES || vars.COOKIES }}
           SENDKEY: ${{ secrets.SENDKEY }}
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
@@ -74,3 +97,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit --allow-empty -m "chore: keepalive to prevent workflow suspension"
           git push
+

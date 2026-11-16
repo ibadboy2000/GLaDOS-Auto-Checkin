@@ -545,6 +545,9 @@ def push_all(title: str, content: str) -> Tuple[int, int]:
 
     返回 (成功数, 已配置数)，供主流程区分"业务失败"与"通知发送失败"（L4）。
     """
+    if os.getenv("GLADOS_VERIFY_ONLY") == "1":
+        logger.info("验证运行：跳过通知推送")
+        return 0, 0
     results: List[Tuple[str, bool]] = []
     for name, env_vars, fn in PUSH_CHANNELS:
         if all(os.getenv(v, "").strip() for v in env_vars):
@@ -570,29 +573,25 @@ def classify_checkin(code: Any, message: str) -> str:
     判断签到结果: ok / repeat / fail
     GLaDOS API: code=0 成功, code=1 已签到, 其他失败
     """
-    try:
-        code = int(code)
-    except (TypeError, ValueError):
-        code = -2
+    if isinstance(code, bool) or not re.fullmatch(r"-?\d+", str(code)):
+        return "fail"
+    code = int(code)
     if code == 0:
         return "ok"
     if code == 1:
         return "repeat"          # GLaDOS 契约：code==1 即已签到，无条件（H4 根治）
-    msg = (message or "").lower()
-    # 使用精确正则匹配代替宽泛的 "got" 子串检查（H3），兼容 point/points
-    if re.search(r"got\s+\d+\s+points?", msg):
-        return "ok"
-    if any(kw in msg for kw in REPEAT_KEYWORDS):
-        return "repeat"
+    # Error messages may contain '已签到' or '避免重复签到'; wording is not proof.
     return "fail"
 
 
-@retry_on_failure()
 def checkin_request(session: requests.Session, headers: Dict[str, str]) -> Dict[str, Any]:
-    """执行签到请求（带重试）"""
+    """签到只提交一次，响应不明时不自动重发 POST。"""
+    if os.getenv("GLADOS_CHECKIN_MODE", "browser") == "browser":
+        from browser_checkin import checkin
+        return checkin(headers["cookie"])
     r = session.post(CHECKIN_URL, headers=headers, json=PAYLOAD, timeout=TIMEOUT)
     r.raise_for_status()
-    return require_json(r)  # 非 JSON 响应抛异常进入重试（M1）
+    return require_json(r)  # 响应不明时报告异常，不重发签到 POST。
 
 
 @retry_on_failure()
@@ -650,11 +649,18 @@ def checkin_account(
         # H1：GLaDOS 不返回 points 字段，从 message 文本解析本次获得积分
         earned = parse_earned_points(message)
         result = classify_checkin(code, message)
+        if result == "ok" and j.get("repeated"):
+            result = "repeat"
+        elif result == "ok" and isinstance(j.get("points"), (int, float)):
+            earned = int(j["points"])
 
         if result == "ok":
             status = f"✅ 成功 (+{earned}积分)"
         elif result == "repeat":
             status = "🔄 已签到"
+            today_points = j.get("today_points")
+            if isinstance(today_points, (int, float)) and today_points >= 0:
+                status += f" (今日+{int(today_points)}积分)"
         else:
             # 区分「服务端鉴权失败」与「其它业务失败」：鉴权失败通常是 Cookie 过期/
             # 复制不完整，需要给出「重新获取 Cookie」的可操作提示，避免与格式问题混淆。
@@ -695,7 +701,7 @@ def checkin_account(
 
         # 4. 积分兑换（#9，仅配置了 EXCHANGE_PLAN 时执行；默认关闭不影响现有功能）
         #    兑换独立于签到结果，但仅在成功查到积分后尝试；失败不影响签到状态/退出码。
-        if exchange_plan and exchange_plan in EXCHANGE_PLANS:
+        if exchange_plan and exchange_plan in EXCHANGE_PLANS and result in ("ok", "repeat"):
             req_pts = EXCHANGE_PLANS[exchange_plan]["points"]
             days_gain = EXCHANGE_PLANS[exchange_plan]["days"]
             if total_points_int is None:
@@ -747,6 +753,9 @@ def main() -> int:
 
     # #9：积分兑换计划（可选，默认关闭；仅显式配置且值合法时启用，避免静默消耗积分）
     raw_plan = (os.getenv("EXCHANGE_PLAN") or os.getenv("GLADOS_EXCHANGE_PLAN") or "").strip()
+    if os.getenv("GLADOS_VERIFY_ONLY") == "1":
+        logger.info("验证运行：跳过积分兑换")
+        raw_plan = ""
     if raw_plan:
         if raw_plan in EXCHANGE_PLANS:
             exchange_plan = raw_plan
@@ -824,6 +833,8 @@ def main() -> int:
     logger.info("%s", "=" * 50)
 
     pushed_success, pushed_configured = push_all(title, content)
+    if os.getenv("GLADOS_VERIFY_ONLY") == "1" and fail:
+        return 1  # 验证运行要求全部账号成功或已签到，避免部分成功掩盖故障
 
     # L4：区分"业务失败"与"通知发送失败"，必要时非零退出避免误判成功
     if ok == 0 and repeat == 0 and len(cookies) > 0:
@@ -840,3 +851,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

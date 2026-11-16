@@ -1,5 +1,38 @@
 # 📌 GLaDOS 自动签到
 
+## 浏览器签到（2026-11-16）
+
+本次改进先读取官网积分记录（UTC+8），已签到账号直接返回“已签到”及今日所得积分，不再次点击。记录无法核对时暂停提交。
+对于尚未签到的账号，先等待官网 challenge 加载，并在需要 Turnstile 时等待原生组件报告验证就绪（最多 90 秒），再由官网页面完成证明与提交。等待超时会失败退出，记录 `checkin_posted=false`，不会提交无效验证或自动重试签到 POST。
+手动运行默认启用 `verify_only`，与分支 push 验证一样跳过通知、兑换，且任一账号失败均返回失败。模拟测试成功只说明流程正确；当天已签到的账号通过预检也不代表新的云端签到或 Cloudflare 验证已通过。
+分支 push 还会启用只读的验证就绪检查：即使今天已签到，也等待网站原生 Turnstile 就绪，但绝不再次提交。手动验证可勾选 `probe_verification`；常规定时签到不启用此检查。
+
+本次实测结果：
+- [签到记录预检](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43781612052)：15 项测试通过，两个账号均由官网记录确认今日已签到，零签到提交。已兼容官网记录中的毫秒时间戳。
+- [原生验证就绪检查](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43782105981)：17 项测试通过；Windows 标准 Chrome 157.0.8103.79 中，两个账号各等待 90 秒后仍未取得就绪状态，零签到提交、零通知、零兑换；运行正确失败退出。
+- 结果分类仅接受合法的成功/已签到接口代码，错误文案中的“避免重复签到”等词不会再导致任务误报通过。常规预检通过不代表 Cloudflare 问题已解决；本改动保持草稿，尚未恢复免费托管环境中的无人值守签到。
+
+**验证状态：尚未恢复 GitHub 免费托管环境的无人值守签到，不应作为已修复版本合并。**
+
+- [Linux Chromium 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43722927718)：7 项测试通过，两个真实账号返回 `device-mismatch`，Turnstile 等待超时。
+- [Windows Chrome 试运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43723752017)：7 项测试通过，两个真实账号不再返回设备不匹配，但均返回 `reason=turnstile`、`tsState=timeout`；签到未记录。
+- 上述试运行未发送通知、未兑换积分。仅迁移 Cookie、改用 Windows 或恢复旧浏览器脚本均未使本次云端验证成功。
+- [Windows Chrome 诊断运行](https://github.com/ibadboy2000/GLaDOS-Auto-Checkin/actions/runs/43725307578)：8 项测试通过；两个真实账号均有 1 个验证 iframe，Cloudflare 主域名无记录到的网络失败，有成功的 HTTP 200 响应，页面 Date 与本机时间差为 0–1 秒；仍返回 `reason=turnstile`、`tsState=timeout`，未取得有效验证令牌。未捕获到六位客户端错误码，未观察到可见复选框；这些信息不能证明已识别出服务端具体判定规则。
+- 诊断中的 `verification_script_loaded=false` 只识别原始脚本地址，可能受 `api.js` 重定向影响，不能据此断言脚本加载失败：已改为跟踪重定向链，并增加测试；验证 iframe 已实际加载。页面 Date 仅作参考，不等于权威时钟校验。
+- Cloudflare 官方说明：[生产验证不支持自动化浏览器及 Playwright 等框架](https://developers.cloudflare.com/cloudflare-challenges/reference/supported-browsers/)；[PAT 请求的 HTTP 401 可能是正常回退](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)，不能单独作为被拦截或环境故障的依据。
+- 还需要能够在托管环境正常通过的网站验证流程或服务方支持的自动化方式；本分支不包含人工验证绕过、令牌伪造或第三方验证码服务。
+
+默认使用标准 Playwright Chromium 打开官网签到页，由页面获取 challenge 并处理 Turnstile，再读取实际签到接口结果。现有 `COOKIES`、多账号、通知渠道和定时时间继续使用。
+
+- GitHub Actions 使用 Windows 免费托管环境中预装的标准 Chrome，安装 `requirements.txt` 和测试用 Chromium。
+- 登录设备不匹配或验证需要人工处理时会报告失败；浏览器模式不能保证所有运行环境均可无人值守通过验证。
+- `codex/restore-browser-checkin` 分支的 push 会自动验证，验证时不发通知、不兑换积分，要求每个账号均成功或已签到。
+- 积分兑换仅在签到成功或已签到且达到所配阈值时执行。
+- 本地运行：`pip install -r requirements.txt`、`python -m playwright install chromium`，设置 `COOKIES` 后执行 `python checkin.py`。
+- 如需诊断旧接口，可显式设置 `GLADOS_CHECKIN_MODE=http`；该模式不执行网页验证。
+
+---
+
 一个基于 **GitHub Actions** 的 **GLaDOS 自动签到脚本**。
 
 **无需服务器、无需编程基础**，每天自动帮你签到。
@@ -233,3 +266,4 @@ A: 可以，配置多个 Secrets 即可同时推送。
 ## 📄 许可证
 
 MIT License
+
