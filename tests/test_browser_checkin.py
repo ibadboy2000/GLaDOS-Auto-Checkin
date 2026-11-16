@@ -3,6 +3,7 @@ import json
 import os
 import unittest
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright
@@ -23,7 +24,7 @@ class BrowserFlowTests(unittest.TestCase):
         cls.browser.close()
         cls.engine.stop()
 
-    def run_fixture(self, payload, status=200):
+    def run_fixture(self, payload, status=200, history=None, ledger_valid=True, verification_ready=True, expected_submissions=1):
         submissions = []
         real_new_context = self.browser.new_context
 
@@ -32,23 +33,33 @@ class BrowserFlowTests(unittest.TestCase):
 
             def route(request_route):
                 request = request_route.request
-                if request.url.endswith(browser_checkin.CHECKIN_PATH):
+                if request.url.endswith(browser_checkin.CHECKIN_PATH) and request.method == "POST":
                     submissions.append(request.post_data_json)
                     request_route.fulfill(status=status, content_type="application/json", body=json.dumps(payload))
+                elif request.url.endswith('/api/user/points'):
+                    data = {"code": 0 if ledger_valid else 7, "history": history or []}
+                    request_route.fulfill(content_type="application/json", body=json.dumps(data))
+                elif request.url.endswith(browser_checkin.CHALLENGE_PATH):
+                    request_route.fulfill(content_type="application/json", body=json.dumps({"code": 0, "nonce": "fixture", "turnstile": {"sitekey": "fixture"}}))
                 else:
-                    html = '''<button class="ckb" onclick="fetch('/api/user/checkin', {
+                    html = '''<script>
+                      fetch('/api/user/checkin/challenge').then(r=>r.json()).then(()=>{
+                        window.turnstile={getResponse:()=>READY ? 'fixture' : ''};
+                      });
+                    </script><button class="ckb" onclick="fetch('/api/user/checkin', {
                       method:'POST', headers:{'Content-Type':'application/json'},
                       body:JSON.stringify({token:location.hostname,nonce:'fixture',proof:'fixture',tsState:'ok',turnstile:'fixture'})
                     })">Check in</button>'''
-                    request_route.fulfill(status=200, content_type="text/html", body=html)
+                    request_route.fulfill(status=200, content_type="text/html", body=html.replace('READY', json.dumps(verification_ready)))
 
             context.route("**/*", route)
             return context
 
         with patch.object(self.browser, "new_context", side_effect=new_context):
-            result = browser_checkin.perform_checkin(self.browser, COOKIE, timeout_ms=5000)
-        self.assertEqual(len(submissions), 1)
-        self.assertEqual(submissions[0]["tsState"], "ok")
+            result = browser_checkin.perform_checkin(self.browser, COOKIE, timeout_ms=5000, verification_timeout_ms=600)
+        self.assertEqual(len(submissions), expected_submissions)
+        if submissions:
+            self.assertEqual(submissions[0]["tsState"], "ok")
         self.assertEqual(len(self.browser.contexts), 0, "Account context must be closed")
         return result
 
@@ -69,8 +80,37 @@ class BrowserFlowTests(unittest.TestCase):
         result = self.run_fixture({"code": 0}, status=503)
         self.assertEqual(result["reason"], "http")
 
+    def test_already_checked_in_skips_post_and_preserves_today_award(self):
+        row = {"id": "1", "business": "checkin", "time": datetime.now(timezone.utc).isoformat(), "change": 7}
+        result = self.run_fixture({"code": 0}, history=[row], expected_submissions=0)
+        self.assertTrue(result["repeated"])
+        self.assertEqual(result["today_points"], 7)
+
+    def test_unverifiable_history_stops_without_submitting(self):
+        result = self.run_fixture({"code": 0}, ledger_valid=False, expected_submissions=0)
+        self.assertEqual(result["reason"], "precheck")
+
+    def test_turnstile_must_be_ready_before_clicking(self):
+        result = self.run_fixture({"code": 0}, verification_ready=False, expected_submissions=0)
+        self.assertEqual(result["reason"], "verification-pending")
+
 
 class ResultTests(unittest.TestCase):
+    def test_checkin_post_is_never_retried_when_its_response_is_lost(self):
+        with patch.dict(os.environ, {"GLADOS_CHECKIN_MODE": "http"}), patch.object(checkin.time, "sleep"), patch.object(checkin.requests.Session, "post", side_effect=checkin.requests.exceptions.Timeout("test")) as post:
+            with checkin.requests.Session() as session, self.assertRaises(checkin.requests.exceptions.Timeout):
+                checkin.checkin_request(session, {"cookie": COOKIE})
+            self.assertEqual(post.call_count, 1)
+
+    def test_ledger_uses_utc_plus_eight_and_excludes_other_credits(self):
+        now = datetime(2026, 11, 16, 0, 1, tzinfo=browser_checkin.SITE_TIMEZONE)
+        row = {"id": 1, "business": "checkin", "time": "2026-11-15T16:00:30Z", "change": 5}
+        rows = [row, row, {"id": 2, "business": "exchange", "time": row["time"], "change": -500},
+                {"id": 3, "business": "checkin", "time": "2026-11-15T15:59:59Z", "change": 100}]
+        self.assertEqual(browser_checkin.today_checkin({"code": 0, "history": rows}, now), {"checked": True, "earned": 5})
+        self.assertIsNone(browser_checkin.today_checkin({"code": None, "history": rows}, now))
+        self.assertIsNone(browser_checkin.today_checkin({"code": 0, "history": [{**row, "time": "2026-11-16T00:00:00"}]}, now))
+
     def test_diagnostics_do_not_export_tokens_or_urls(self):
         page = SimpleNamespace(on=lambda *args: None, frames=[])
         diagnostic = browser_checkin.VerificationDiagnostics(page, "test-browser")

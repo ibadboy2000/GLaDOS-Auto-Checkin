@@ -5,15 +5,22 @@ import json
 import re
 import time
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
-from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
+from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout, sync_playwright
 
 logger = logging.getLogger("GLaDOS")
 BASE_URL = "https://glados.cloud"
 CHECKIN_PAGE = BASE_URL + "/console/checkin"
 CHECKIN_PATH = "/api/user/checkin"
+SITE_TIMEZONE = timezone(timedelta(hours=8))
+CHALLENGE_PATH = CHECKIN_PATH + "/challenge"
+VERIFICATION_READY = """() => {
+  try { return !!(window.turnstile && window.turnstile.getResponse()); }
+  catch { return false; }
+}"""
 
 
 class VerificationDiagnostics:
@@ -26,12 +33,26 @@ class VerificationDiagnostics:
         self.error_codes = set()
         self.api_loaded = False
         self.page_date_delta_seconds = None
+        self.challenge_loaded = False
+        self.turnstile_required = None
+        self.verification_ready = None
+        self.checkin_posted = False
+        self.precheck = "not-run"
+        page.on("request", self.on_request)
         page.on("response", self.on_response)
         page.on("requestfailed", self.on_request_failed)
         page.on("console", self.on_console)
 
     def on_response(self, response):
         location = urlsplit(response.url)
+        if location.hostname == "glados.cloud" and location.path == CHALLENGE_PATH:
+            try:
+                data = response.json()
+                self.challenge_loaded = bool(response.ok and data.get("code") == 0 and data.get("nonce"))
+                if self.challenge_loaded:
+                    self.turnstile_required = bool(data.get("turnstile"))
+            except Exception:
+                pass
         if location.hostname == "challenges.cloudflare.com":
             self.statuses[str(response.status)] += 1
             request = response.request
@@ -51,6 +72,11 @@ class VerificationDiagnostics:
                 self.page_date_delta_seconds = round(time.time() - server_time)
             except (KeyError, ValueError, TypeError, OverflowError):
                 pass
+
+    def on_request(self, request):
+        location = urlsplit(request.url)
+        if location.hostname == "glados.cloud" and location.path == CHECKIN_PATH and request.method == "POST":
+            self.checkin_posted = True
 
     def on_request_failed(self, request):
         if urlsplit(request.url).hostname == "challenges.cloudflare.com":
@@ -84,6 +110,11 @@ class VerificationDiagnostics:
             "interactive_checkbox_visible": interactive_checkbox_visible,
             # A cached response Date is not an authoritative clock check.
             "page_date_delta_seconds": self.page_date_delta_seconds,
+            "challenge_loaded": self.challenge_loaded,
+            "turnstile_required": self.turnstile_required,
+            "verification_ready_before_click": self.verification_ready,
+            "checkin_posted": self.checkin_posted,
+            "precheck": self.precheck,
         }
 
 
@@ -101,7 +132,40 @@ def failure(message, reason):
     return {"code": -2, "message": message, "reason": reason}
 
 
-def perform_checkin(browser, cookie, timeout_ms=120000):
+def today_checkin(points, now=None):
+    """Read today's check-in ledger in UTC+8; None means not verifiable."""
+    if not isinstance(points, dict) or points.get("code") != 0 or not isinstance(points.get("history"), list):
+        return None
+    today = (now or datetime.now(SITE_TIMEZONE)).astimezone(SITE_TIMEZONE).date()
+    checked, total, unknown, seen = False, 0, False, set()
+    for row in points["history"]:
+        if not isinstance(row, dict) or not re.search(r"(^|[:/_-])checkin($|[:/_-])", str(row.get("business", "")), re.I):
+            continue
+        try:
+            when = datetime.fromisoformat(str(row["time"]).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                return None
+            if when.astimezone(SITE_TIMEZONE).date() != today:
+                continue
+        except (KeyError, TypeError, ValueError):
+            return None
+        row_id = row.get("id")
+        if row_id is not None:
+            if str(row_id) in seen:
+                continue
+            seen.add(str(row_id))
+        checked = True
+        try:
+            award = float(row["change"])
+            if not 0 <= award < 1000000:
+                raise ValueError("invalid points")
+            total += award
+        except (KeyError, TypeError, ValueError):
+            unknown = True
+    return {"checked": checked, "earned": None if unknown else int(total)}
+
+
+def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=90000):
     """One isolated context and at most one submission per account.
 
     Interactive verification and device/login failures are reported, not bypassed.
@@ -125,8 +189,44 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
                 return failure("浏览器登录态失效，请重新登录并更新 COOKIES", "login")
             return failure("签到按钮未出现：页面或验证状态需要人工检查", "page-load")
 
-        # The frontend refreshes its challenge and waits for Turnstile itself.
-        page.wait_for_timeout(3000)
+        # Query the site's ledger using the browser's own origin and session.
+        ledger = page.evaluate("""async () => {
+          try {
+            const r = await fetch('/api/user/points', {credentials:'same-origin', cache:'no-store', signal:AbortSignal.timeout(15000)});
+            if (!r.ok) return null;
+            const d = await r.json();
+            return {code:d.code, history:d.history};
+          } catch { return null; }
+        }""")
+        previous = today_checkin(ledger)
+        if previous is None:
+            diagnostic.precheck = "unavailable"
+            return failure("无法核对今日签到记录，本次未提交，避免重复签到", "precheck")
+        if previous["checked"]:
+            diagnostic.precheck = "already-checked"
+            logger.info("官网积分记录确认今日已签到，跳过提交；今日获得积分: %s", previous["earned"] if previous["earned"] is not None else "unknown")
+            return {"code": 0, "repeated": True, "points": previous["earned"], "today_points": previous["earned"], "message": "今日已签到（由官网积分记录确认）", "source": "history"}
+        diagnostic.precheck = "not-checked"
+
+        challenge_deadline = time.monotonic() + 15
+        while not diagnostic.challenge_loaded and time.monotonic() < challenge_deadline:
+            page.wait_for_timeout(200)
+        if not diagnostic.challenge_loaded:
+            return failure("官网签到挑战未正常加载，本次未提交", "challenge-load")
+        if diagnostic.turnstile_required:
+            logger.info("等待官网 Turnstile 完成验证，最长 %d 秒；验证就绪前不提交签到", verification_timeout_ms // 1000)
+            try:
+                # Official widget API: only a boolean leaves the page. Tokens
+                # are never replaced, exported, replayed or logged.
+                page.wait_for_function(VERIFICATION_READY, timeout=verification_timeout_ms, polling=500)
+                diagnostic.verification_ready = True
+            except BrowserTimeout:
+                diagnostic.verification_ready = False
+                return failure("官网 Turnstile 在托管浏览器中未完成验证，本次未提交签到", "verification-pending")
+        else:
+            diagnostic.verification_ready = True
+
+        # Let the frontend create its proof and submit the fresh challenge.
         with page.expect_response(
             lambda item: urlsplit(item.url).netloc == "glados.cloud"
             and urlsplit(item.url).path == CHECKIN_PATH
@@ -159,6 +259,8 @@ def perform_checkin(browser, cookie, timeout_ms=120000):
         return payload
     except BrowserTimeout:
         return failure("浏览器签到等待超时，可能需要人工验证；未确认签到成功", "timeout")
+    except BrowserError:
+        return failure("浏览器执行失败，本次结果未确认；不会自动重试提交", "browser")
     finally:
         if diagnostic is not None:
             try:

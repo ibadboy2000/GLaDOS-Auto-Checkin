@@ -590,15 +590,14 @@ def classify_checkin(code: Any, message: str) -> str:
     return "fail"
 
 
-@retry_on_failure()
 def checkin_request(session: requests.Session, headers: Dict[str, str]) -> Dict[str, Any]:
-    """执行签到请求（带重试）"""
+    """签到只提交一次，响应不明时不自动重发 POST。"""
     if os.getenv("GLADOS_CHECKIN_MODE", "browser") == "browser":
         from browser_checkin import checkin
         return checkin(headers["cookie"])
     r = session.post(CHECKIN_URL, headers=headers, json=PAYLOAD, timeout=TIMEOUT)
     r.raise_for_status()
-    return require_json(r)  # 非 JSON 响应抛异常进入重试（M1）
+    return require_json(r)  # 响应不明时报告异常，不重发签到 POST。
 
 
 @retry_on_failure()
@@ -665,6 +664,9 @@ def checkin_account(
             status = f"✅ 成功 (+{earned}积分)"
         elif result == "repeat":
             status = "🔄 已签到"
+            today_points = j.get("today_points")
+            if isinstance(today_points, (int, float)) and today_points >= 0:
+                status += f" (今日+{int(today_points)}积分)"
         else:
             # 区分「服务端鉴权失败」与「其它业务失败」：鉴权失败通常是 Cookie 过期/
             # 复制不完整，需要给出「重新获取 Cookie」的可操作提示，避免与格式问题混淆。
