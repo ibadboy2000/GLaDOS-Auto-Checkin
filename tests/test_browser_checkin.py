@@ -110,6 +110,16 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(browser_checkin.today_checkin({"code": 0, "history": rows}, now), {"checked": True, "earned": 5})
         self.assertIsNone(browser_checkin.today_checkin({"code": None, "history": rows}, now))
         self.assertIsNone(browser_checkin.today_checkin({"code": 0, "history": [{**row, "time": "2026-11-16T00:00:00"}]}, now))
+        milliseconds = datetime(2026, 11, 15, 16, 0, 30, tzinfo=timezone.utc).timestamp() * 1000
+        self.assertEqual(browser_checkin.today_checkin({"code": 0, "history": [{**row, "time": milliseconds}]}, now), {"checked": True, "earned": 5})
+
+    def test_failure_wording_cannot_be_misclassified_as_completed(self):
+        for code, message in [(-2, "无法核对今日签到记录，本次未提交，避免重复签到"), (8, "Cloudflare failed; already checked?"), (None, "got 2 points"), (False, "success"), (0.5, "success")]:
+            self.assertEqual(checkin.classify_checkin(code, message), "fail")
+        with patch.object(checkin, "checkin_request", return_value={"code": -2, "message": "避免重复签到", "reason": "precheck"}), patch.object(checkin, "api_get", return_value={"data": {}}):
+            with checkin.requests.Session() as session:
+                result = checkin.checkin_account(session, COOKIE, 1)
+        self.assertEqual(result["result"], "fail")
 
     def test_diagnostics_do_not_export_tokens_or_urls(self):
         page = SimpleNamespace(on=lambda *args: None, frames=[])

@@ -573,20 +573,14 @@ def classify_checkin(code: Any, message: str) -> str:
     判断签到结果: ok / repeat / fail
     GLaDOS API: code=0 成功, code=1 已签到, 其他失败
     """
-    try:
-        code = int(code)
-    except (TypeError, ValueError):
-        code = -2
+    if isinstance(code, bool) or not re.fullmatch(r"-?\d+", str(code)):
+        return "fail"
+    code = int(code)
     if code == 0:
         return "ok"
     if code == 1:
         return "repeat"          # GLaDOS 契约：code==1 即已签到，无条件（H4 根治）
-    msg = (message or "").lower()
-    # 使用精确正则匹配代替宽泛的 "got" 子串检查（H3），兼容 point/points
-    if re.search(r"got\s+\d+\s+points?", msg):
-        return "ok"
-    if any(kw in msg for kw in REPEAT_KEYWORDS):
-        return "repeat"
+    # Error messages may contain '已签到' or '避免重复签到'; wording is not proof.
     return "fail"
 
 

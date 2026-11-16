@@ -38,6 +38,7 @@ class VerificationDiagnostics:
         self.verification_ready = None
         self.checkin_posted = False
         self.precheck = "not-run"
+        self.ledger_schema = None
         page.on("request", self.on_request)
         page.on("response", self.on_response)
         page.on("requestfailed", self.on_request_failed)
@@ -115,6 +116,7 @@ class VerificationDiagnostics:
             "verification_ready_before_click": self.verification_ready,
             "checkin_posted": self.checkin_posted,
             "precheck": self.precheck,
+            "ledger_schema": self.ledger_schema,
         }
 
 
@@ -142,12 +144,17 @@ def today_checkin(points, now=None):
         if not isinstance(row, dict) or not re.search(r"(^|[:/_-])checkin($|[:/_-])", str(row.get("business", "")), re.I):
             continue
         try:
-            when = datetime.fromisoformat(str(row["time"]).replace("Z", "+00:00"))
+            raw_time = row["time"]
+            if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+                # The website uses new Date(row.time): numeric values are ms.
+                when = datetime.fromtimestamp(raw_time / 1000, timezone.utc)
+            else:
+                when = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
             if when.tzinfo is None:
                 return None
             if when.astimezone(SITE_TIMEZONE).date() != today:
                 continue
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError, OSError):
             return None
         row_id = row.get("id")
         if row_id is not None:
@@ -198,6 +205,12 @@ def perform_checkin(browser, cookie, timeout_ms=120000, verification_timeout_ms=
             return {code:d.code, history:d.history};
           } catch { return null; }
         }""")
+        history = ledger.get("history") if isinstance(ledger, dict) else None
+        diagnostic.ledger_schema = {
+            "code_ok": isinstance(ledger, dict) and ledger.get("code") == 0,
+            "history_is_list": isinstance(history, list),
+            "timestamp_types": sorted({type(row.get("time")).__name__ for row in history if isinstance(row, dict)}) if isinstance(history, list) else [],
+        }
         previous = today_checkin(ledger)
         if previous is None:
             diagnostic.precheck = "unavailable"
